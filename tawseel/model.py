@@ -15,7 +15,6 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import FunctionTransformer
-from sklearn.base import clone
 from sklearn.pipeline import make_pipeline
 from sklearn.dummy import DummyClassifier
 
@@ -29,10 +28,6 @@ FEATURE_COLUMNS: list[str] = [
     "cod_amount", "n_items", "address_text",
 ]
 
-MODEL_FEATURES = FEATURE_COLUMNS + [
-    "customer_prior_parcels",
-    "customer_prior_fail_rate"
-]
 
 
 def add_history_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -116,6 +111,19 @@ def time_split(df: pd.DataFrame, time_col: str = "created_at",
     return train_df, test_df
 
 
+def address_to_text(X):
+
+
+    return X["address_text"].fillna("").astype(str)
+
+def extract_date_features(X):
+        
+        
+        ts = pd.to_datetime(X["created_at"])
+        return pd.DataFrame({"month": ts.dt.month, "weekday": ts.dt.weekday,
+                         "hour": ts.dt.hour}, index=X.index)
+
+
 def build_pipeline(seed: int = 0) -> Pipeline:
     """Return an UNFITTED Pipeline.
 
@@ -128,17 +136,16 @@ def build_pipeline(seed: int = 0) -> Pipeline:
     cat_features = ["customer_id", "merchant_id", "area", "promised_slot"]
     text_features = "address_text"
     date_features = ["created_at"]
-    def extract_date_features(X):
-        return pd.DataFrame({
-            "created_at_month": X["created_at"].dt.month,
-            "created_at_weekday": X["created_at"].dt.weekday,
-            "created_at_hour": X["created_at"].dt.hour,
-        })
+
     pre = ColumnTransformer([
-        ("num", make_pipeline(SimpleImputer(strategy="median") , StandardScaler()), num_features),
-        ("cat",make_pipeline(SimpleImputer(strategy="most_frequent") , OneHotEncoder(handle_unknown="ignore", min_frequency=5)), cat_features),
-        ("text", TfidfVectorizer(analyzer="char_wb" , ngram_range=(2, 4), min_df=3), text_features),
-        ("date", (FunctionTransformer(func=extract_date_features)), date_features)
+        ("num", make_pipeline(SimpleImputer(strategy="median", add_indicator=True) , StandardScaler()), num_features),
+        ("cat",make_pipeline(SimpleImputer(strategy="constant", fill_value="missing") , OneHotEncoder(handle_unknown="ignore", min_frequency=5)), cat_features),
+        ("text", make_pipeline(FunctionTransformer(address_to_text),
+                       TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=3)),
+         ["address_text"]),
+        ("date", make_pipeline(FunctionTransformer(extract_date_features),
+                       SimpleImputer(strategy="median"), StandardScaler()),
+         ["created_at"]),
     ])
     pipeline = Pipeline([
         ("pre", pre),
@@ -151,16 +158,14 @@ def evaluate(model, test_df: pd.DataFrame) -> dict:
     """{"roc_auc", "pr_auc", "brier", "base_rate", "n"} from model.predict_proba(test_df)[:, 1]
     against test_df["failed"] (roc_auc_score, average_precision_score, brier_score_loss)."""
     y_true = test_df[TARGET]
-    X_test = test_df[MODEL_FEATURES]
-
-    y_prob = model.predict_proba(X_test)[:, 1]
+    y_prob = model.predict_proba(test_df)[:, 1]
 
     return {
         "roc_auc": roc_auc_score(y_true, y_prob),
         "pr_auc": average_precision_score(y_true, y_prob),
         "brier": brier_score_loss(y_true, y_prob),
-        "base_rate": y_true.mean(),
-        "n": len(test_df),
+        "base_rate": float(y_true.mean()),
+        "n": int(len(test_df)),
     }
 
 
@@ -174,7 +179,7 @@ def compare_to_baseline(train_df: pd.DataFrame, test_df: pd.DataFrame, seed: int
     dummy = DummyClassifier(strategy="prior")
 
     model.fit(train_df, y_train)
-    dummy.fit(train_df[MODEL_FEATURES], y_train)
+    dummy.fit(train_df, y_train)
 
     model_results = evaluate(model, test_df)
     dummy_results = evaluate(dummy, test_df)
